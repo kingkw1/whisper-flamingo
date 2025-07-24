@@ -43,12 +43,13 @@ parser.add_argument('--task', default='transcribe', type=str, help='transcribe, 
 parser.add_argument('--normalizer', default='fairseq', type=str, help='whisper OR fairseq')
 parser.add_argument('--use-original-whisper', default=0, type=int, 
                                         help='if 1, ignore checkpoint-path and use original whisper')
+parser.add_argument('--user-tsv', default=None, type=str,
+                    help='Optional TSV with user-specified video/audio path')
                                         
 args = parser.parse_args()
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
-
 # process lang and task
 visible = True if 'visible' in args.lang else False
 if 'visible' in args.lang:
@@ -57,23 +58,35 @@ use_lrs2 = True if args.lang == 'lrs2' else False
 if args.lang == 'lrs2':
     args.lang = 'en'
 
-# audio_transcript_pair_list = load_data(480000, 350, [args.lang], muavic_root='/data/sls/scratch/roudi/datasets/muavic/', 
-audio_transcript_pair_list = load_data(480000, 350, [args.lang], muavic_root='', 
-                                       include_audio_lens=True, task=args.task, lrs2=use_lrs2)
-
-test_dataset =  audio_transcript_pair_list['test']
-test_dataset = [[i[0], i[1].replace('/data/sls/scratch/roudi/datasets/muavic/', ''),
-                                    i[2], i[3]] for i in test_dataset] # fix paths
-# test_dataset = [[i[0], i[1], i[2], i[3]] for i in test_dataset] # use original paths
+# Decide on tokenizer setup before data loading
 multilingual = True if 'large' in args.model_type or 'en' not in args.model_type else False
 print("Multilingual tokenizer : {}".format(multilingual))
 
-# We use the transcribe token (not translate) for En-X to enable new capabilities
+# Set decoding task type: transcribe or translate
 task = 'translate' if args.task == 'X-En' else 'transcribe'
-tokenizer = whisper.tokenizer.get_tokenizer(multilingual=multilingual, task=task) 
+tokenizer = whisper.tokenizer.get_tokenizer(multilingual=multilingual, task=task)
 special_token_set = set(tokenizer.special_tokens.values())
 
-args.checkpoint_path= None if args.use_original_whisper else args.checkpoint_path
+# NEW: Use user TSV if provided, otherwise use default dataset
+if args.user_tsv:
+    from utils import load_user_tsv
+    print("Loading user-specified test data from:", args.user_tsv)
+    test_dataset = load_user_tsv(args.user_tsv, tokenizer)
+else:
+    audio_transcript_pair_list = load_data(
+        480000, 350, [args.lang],
+        muavic_root='',
+        include_audio_lens=True,
+        task=args.task,
+        lrs2=use_lrs2
+    )
+    test_dataset = audio_transcript_pair_list['test']
+    test_dataset = [[i[0], i[1].replace('/data/sls/scratch/roudi/datasets/muavic/', ''),
+                     i[2], i[3]] for i in test_dataset]  # fix paths
+
+# Allow checkpoint override via use_original_whisper flag
+args.checkpoint_path = None if args.use_original_whisper else args.checkpoint_path
+
 # If the original Whisper from OpenAI is used, crop / pad the audio to 30s
 dataset = MuavicVideoDataset(test_dataset, 
                                 tokenizer, 
@@ -96,7 +109,7 @@ length_sorter = LengthBatchSampler(batch_bins=SAMPLE_RATE * 40 if args.checkpoin
                             drop_last=False)
 
 dataloader = torch.utils.data.DataLoader(dataset,
-                    num_workers=8,
+                    num_workers=0,
                     collate_fn=WhisperVideoCollatorWithPadding(),
                     batch_sampler=length_sorter)
 
@@ -126,14 +139,35 @@ if args.checkpoint_path is not None:
 options = whisper.DecodingOptions(task=task, language=args.lang, fp16=args.fp16, without_timestamps=True, 
                                   beam_size=None if args.beam_size == 1 else args.beam_size,)
 
-if args.checkpoint_path is not None:
-    out_path = '{}/{}/{}/test/{}/snr-{}/visible-{}/beam-{}/{}' \
-                .format(args.decode_path,args.checkpoint_path, args.lang, args.modalities, args.noise_snr, int(visible), 
-                        args.beam_size, args.noise_fn.split('/')[-2])
+if getattr(args, 'user_tsv', None) is not None:
+    # Use the base directory name of the TSV as a unique identifier
+    usertsv_base = os.path.basename(os.path.dirname(args.user_tsv))
+    if usertsv_base == '':
+        usertsv_base = 'user'
+    base_part = args.checkpoint_path if args.checkpoint_path is not None else args.model_type
+    out_path = '{}/{}/{}/test/{}/snr-1000/visible-{}/beam-{}/{}'.format(
+        args.decode_path,
+        base_part,
+        args.lang,
+        args.modalities,
+        int(visible),
+        args.beam_size,
+        usertsv_base
+    )
 else:
-    out_path = '{}/{}/{}/test/{}/snr-{}/visible-{}/beam-{}/{}' \
-                .format(args.decode_path,args.model_type,args.lang, args.modalities, args.noise_snr, int(visible),
-                        args.beam_size, args.noise_fn.split('/')[-2])
+    base_part = args.checkpoint_path if args.checkpoint_path is not None else args.model_type
+    noise_fn_dir = args.noise_fn.split('/')[-2] if (getattr(args, 'noise_fn', None) is not None and '/' in args.noise_fn) else 'noisefn'
+    out_path = '{}/{}/{}/test/{}/snr-{}/visible-{}/beam-{}/{}'.format(
+        args.decode_path,
+        base_part,
+        args.lang,
+        args.modalities,
+        args.noise_snr,
+        int(visible),
+        args.beam_size,
+        noise_fn_dir
+    )
+
 os.makedirs(out_path, exist_ok=True)
 
 # Convert new paramters to fp16

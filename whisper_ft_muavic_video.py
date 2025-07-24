@@ -56,7 +56,15 @@ class MuavicVideoDataset(torch.utils.data.Dataset):
         return len(self.audio_info_list)
 
     def __getitem__(self, id):
-        lang, audio_path, text, _ = self.audio_info_list[id]
+        # lang, audio_path, text, _ = self.audio_info_list[id]
+        # Add support for passing video_path from the TSV
+        entry = self.audio_info_list[id]
+        if len(entry) == 5:
+            lang, audio_path, text, _, video_path = entry
+        else:
+            lang, audio_path, text, _ = entry
+            video_path = audio_path.replace('audio', 'video').replace('.wav', '.mp4')
+
         # audio = load_wave(audio_path, sample_rate=self.sample_rate)
         if np.random.rand() > self.noise_prob: # disable noise
             sample_rate, wav_data = wavfile.read(audio_path)
@@ -90,7 +98,8 @@ class MuavicVideoDataset(torch.utils.data.Dataset):
                         self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
-        video_path = audio_path.replace('audio', 'video').replace('.wav', '.mp4')
+        if video_path is None:
+            video_path = audio_path.replace('audio', 'video').replace('.wav', '.mp4')
         video = load_video_feats(video_path, train=self.train)
         video = video.astype(np.float32)
 

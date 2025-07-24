@@ -1,6 +1,7 @@
 import os
 import cv2
 import random
+import csv
 from pathlib import Path
 import torch
 import torchaudio
@@ -605,3 +606,33 @@ class DatasetFromSampler(Dataset):
             int: length of the dataset
         """
         return len(self.sampler)
+    
+# Match the expected interface: lang, audio_path, text, audio_len, video_path
+def load_user_tsv(tsv_path, tokenizer):
+    SAMPLE_RATE = 16000
+    audio_info_list = []
+
+    with open(tsv_path, 'r') as f:
+        for line in f:
+            if line.strip() == "":
+                continue
+            fields = line.strip().split('\t')
+            if len(fields) < 3:
+                raise ValueError("Expected TSV format: video_path<TAB>audio_path<TAB>transcript")
+
+            video_path = fields[0].strip()
+            audio_path = fields[1].strip()
+            transcript = fields[2].strip()
+            lang = "en"
+
+            try:
+                sr, samples = wavfile.read(audio_path)
+                audio_len = len(samples)
+            except Exception as e:
+                print(f"[WARNING] Could not read: {audio_path}, using dummy length. Error: {e}")
+                audio_len = SAMPLE_RATE * 10
+
+            # Return video explicitly as a 5th element
+            audio_info_list.append([lang, audio_path, transcript, audio_len, video_path])
+
+    return audio_info_list
